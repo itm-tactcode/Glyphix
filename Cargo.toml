@@ -1,0 +1,41 @@
+[package]
+name = "glyphix"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Pixel-grid glyphs as a huge algorithmic alphabet (Library of Babel for glyphs)"
+readme = "README.md"
+keywords = ["glyph", "encoding", "pixel", "barcode", "alphabet"]
+categories = ["encoding", "graphics"]
+
+[dependencies]
+thiserror = "2"
+# Phase 2 integrity trailers
+crc32fast = "1"
+blake3 = "1"
+# Phase 3 PNG (optional)
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+
+[lib]
+name = "glyphix"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glyphix"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+# PNG read/write via `image` (exact pixels, png feature only)
+render = ["dep:image"]
+# CLI: profiles, capacity, encode/decode files, roundtrip
+cli = ["dep:clap", "render"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
