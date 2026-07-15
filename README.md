@@ -11,8 +11,6 @@ Byte strings map to **one glyph** or a **sequence** of glyphs. Symbols are indic
 
 This is **not** an Effector address format. Effector uses **bech32m**. Glyphix is a separate encoding playground.
 
-See **[AGENTS.md](AGENTS.md)** for goals, place-value rules, profiles, and phases. See **[PROGRESS.md](PROGRESS.md)** for what has landed.
-
 ## Place values (binary)
 
 Counting starts at the **bottom-right** (least significant place):
