@@ -6,10 +6,10 @@
 //! (`RenderOptions::cell_scale`). No anti-aliasing — canonical files are
 //! piecewise-constant so lossless re-parse is possible.
 //!
-//! # Layout (Phase 3)
+//! # Layout (Phase 4)
 //!
-//! Horizontal strip of glyphs, left → right, optional quiet **margin** (device
-//! pixels) and **gap** between glyphs. Full multi-row layout is Phase 4.
+//! Horizontal **strip** or **grid** of glyphs, quiet **margin**, gaps, and
+//! optional **separator** bars. Geometry lives in [`crate::layout`].
 //!
 //! # PNG
 //!
@@ -19,28 +19,29 @@
 use crate::color::{index_to_rgb, rgb_to_index, Rgb};
 use crate::error::{GlyphixError, Result};
 use crate::grid::Grid;
+use crate::layout::{
+    glyph_origin, glyph_pixel_size as layout_glyph_pixel_size, image_size, infer_glyph_count,
+    GlyphLayout, LayoutOptions, Separator,
+};
 use crate::profile::GlyphProfile;
 
-/// How to arrange multiple glyphs in the raster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum GlyphLayout {
-    /// Left-to-right strip (Phase 3 default).
-    #[default]
-    HorizontalStrip,
-}
+pub use crate::layout::glyph_origins;
 
-/// Options for raster / SVG rendering.
+/// Options for raster / SVG rendering (wraps [`LayoutOptions`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
     /// Device pixels per logical cell edge (\(S \ge 1\)). Font-size analogue.
     pub cell_scale: u32,
-    /// Quiet margin around the whole strip (device pixels).
+    /// Quiet margin around the whole composition (device pixels).
     pub margin: u32,
-    /// Gap between adjacent glyphs (device pixels).
+    /// Horizontal gap between glyphs (device pixels, not including separator).
     pub gap: u32,
+    /// Vertical gap between rows; if `None`, uses `gap`.
+    pub gap_y: Option<u32>,
     /// Arrangement of glyphs.
     pub layout: GlyphLayout,
+    /// Optional separator bars between adjacent glyphs.
+    pub separator: Option<Separator>,
 }
 
 impl Default for RenderOptions {
@@ -49,7 +50,9 @@ impl Default for RenderOptions {
             cell_scale: 1,
             margin: 0,
             gap: 0,
+            gap_y: None,
             layout: GlyphLayout::HorizontalStrip,
+            separator: None,
         }
     }
 }
@@ -63,14 +66,42 @@ impl RenderOptions {
         Ok(o)
     }
 
-    /// Validate scale ≥ 1.
-    pub fn validate(&self) -> Result<()> {
-        if self.cell_scale == 0 {
-            return Err(GlyphixError::InvalidRender(
-                "cell_scale (S) must be ≥ 1".into(),
-            ));
+    /// Horizontal strip convenience.
+    pub fn strip(cell_scale: u32, margin: u32, gap: u32) -> Result<Self> {
+        let mut o = Self::default();
+        o.cell_scale = cell_scale;
+        o.margin = margin;
+        o.gap = gap;
+        o.validate()?;
+        Ok(o)
+    }
+
+    /// Grid convenience (`columns` per row).
+    pub fn grid(cell_scale: u32, columns: u32, margin: u32, gap: u32) -> Result<Self> {
+        let mut o = Self::default();
+        o.cell_scale = cell_scale;
+        o.margin = margin;
+        o.gap = gap;
+        o.layout = GlyphLayout::grid(columns)?;
+        o.validate()?;
+        Ok(o)
+    }
+
+    /// Convert to pure layout geometry.
+    pub fn to_layout(&self) -> LayoutOptions {
+        LayoutOptions {
+            cell_scale: self.cell_scale,
+            margin: self.margin,
+            gap_x: self.gap,
+            gap_y: self.gap_y.unwrap_or(self.gap),
+            layout: self.layout,
+            separator: self.separator,
         }
-        Ok(())
+    }
+
+    /// Validate scale and layout.
+    pub fn validate(&self) -> Result<()> {
+        self.to_layout().validate()
     }
 }
 
@@ -112,50 +143,16 @@ impl RgbaImage {
 
 /// Device size of one glyph tile (without margin/gap).
 pub fn glyph_pixel_size(profile: &GlyphProfile, scale: u32) -> Result<(u32, u32)> {
-    if scale == 0 {
-        return Err(GlyphixError::InvalidRender(
-            "cell_scale (S) must be ≥ 1".into(),
-        ));
-    }
-    Ok((
-        profile
-            .width
-            .checked_mul(scale)
-            .ok_or_else(|| GlyphixError::InvalidRender("width*scale overflow".into()))?,
-        profile
-            .height
-            .checked_mul(scale)
-            .ok_or_else(|| GlyphixError::InvalidRender("height*scale overflow".into()))?,
-    ))
+    layout_glyph_pixel_size(profile, scale)
 }
 
-/// Full image dimensions for a glyph strip.
+/// Full image dimensions for a glyph composition.
 pub fn image_dimensions(
     profile: &GlyphProfile,
     glyph_count: usize,
     opts: &RenderOptions,
 ) -> Result<(u32, u32)> {
-    opts.validate()?;
-    if glyph_count == 0 {
-        return Err(GlyphixError::EmptyGlyphSequence);
-    }
-    let (gw, gh) = glyph_pixel_size(profile, opts.cell_scale)?;
-    let n = glyph_count as u32;
-    let gaps = n
-        .saturating_sub(1)
-        .checked_mul(opts.gap)
-        .ok_or_else(|| GlyphixError::InvalidRender("gap overflow".into()))?;
-    let content_w = gw
-        .checked_mul(n)
-        .and_then(|w| w.checked_add(gaps))
-        .ok_or_else(|| GlyphixError::InvalidRender("content width overflow".into()))?;
-    let width = content_w
-        .checked_add(opts.margin.saturating_mul(2))
-        .ok_or_else(|| GlyphixError::InvalidRender("image width overflow".into()))?;
-    let height = gh
-        .checked_add(opts.margin.saturating_mul(2))
-        .ok_or_else(|| GlyphixError::InvalidRender("image height overflow".into()))?;
-    Ok((width, height))
+    image_size(profile, glyph_count, &opts.to_layout())
 }
 
 fn put_rgba(buf: &mut [u8], width: u32, x: u32, y: u32, rgba: [u8; 4]) {
@@ -185,23 +182,108 @@ fn fill_rect(
     }
 }
 
-/// Render glyphs to an exact RGBA image (no anti-alias).
-pub fn render_rgba(
+fn paint_glyph_at(
+    buf: &mut [u8],
+    img_w: u32,
+    img_h: u32,
+    profile: &GlyphProfile,
+    grid: &Grid,
+    ox: u32,
+    oy: u32,
+    scale: u32,
+) -> Result<()> {
+    for cy in 0..profile.height {
+        for cx in 0..profile.width {
+            let idx = grid.get(cx, cy)?;
+            let [r, gch, b] = index_to_rgb(profile.palette_size, idx)?;
+            let px = ox + cx * scale;
+            let py = oy + cy * scale;
+            fill_rect(buf, img_w, img_h, px, py, scale, scale, [r, gch, b, 255]);
+        }
+    }
+    Ok(())
+}
+
+fn paint_separators(
+    buf: &mut [u8],
+    img_w: u32,
+    img_h: u32,
+    profile: &GlyphProfile,
+    glyph_count: usize,
+    layout: &LayoutOptions,
+) -> Result<()> {
+    let Some(sep) = layout.separator else {
+        return Ok(());
+    };
+    let (gw, gh) = layout_glyph_pixel_size(profile, layout.cell_scale)?;
+    let [r, g, b] = sep.color;
+    let rgba = [r, g, b, 255];
+    let cols = layout.layout.columns_for(glyph_count);
+    let rows = layout.layout.rows_for(glyph_count);
+
+    for i in 0..glyph_count {
+        let (ox, oy) = glyph_origin(profile, i, glyph_count, layout)?;
+        let (col, row) = match layout.layout {
+            GlyphLayout::HorizontalStrip => (i as u32, 0u32),
+            GlyphLayout::Grid { columns } => ((i as u32) % columns, (i as u32) / columns),
+        };
+        // Vertical separator to the right of glyph (if not last in row)
+        let last_in_row = match layout.layout {
+            GlyphLayout::HorizontalStrip => i + 1 >= glyph_count,
+            GlyphLayout::Grid { columns } => {
+                col + 1 >= columns || i + 1 >= glyph_count
+            }
+        };
+        if !last_in_row && sep.thickness > 0 {
+            // Separator immediately after glyph tile (before next origin's gap+sep budget).
+            let sx = ox + gw;
+            fill_rect(buf, img_w, img_h, sx, oy, sep.thickness, gh, rgba);
+        }
+        // Horizontal separator below glyph (if not last row and glyph has row-mate below)
+        let last_row = row + 1 >= rows;
+        if !last_row {
+            // Only draw if there is a glyph in the cell below or we always draw full row bars
+            let sy = oy + gh;
+            fill_rect(buf, img_w, img_h, ox, sy, gw, sep.thickness, rgba);
+        }
+        let _ = cols; // used via layout
+    }
+    Ok(())
+}
+
+fn prepare_glyphs(
     profile: &GlyphProfile,
     glyphs: &[Grid],
     opts: &RenderOptions,
-) -> Result<RgbaImage> {
-    opts.validate()?;
+) -> Result<Vec<Grid>> {
     if glyphs.is_empty() {
         return Err(GlyphixError::EmptyGlyphSequence);
     }
     for g in glyphs {
         g.validate_profile(profile)?;
     }
+    match opts.layout {
+        GlyphLayout::Grid { columns } => {
+            crate::layout::pad_glyphs_for_grid(profile, glyphs, columns)
+        }
+        GlyphLayout::HorizontalStrip => Ok(glyphs.to_vec()),
+    }
+}
 
-    let (width, height) = image_dimensions(profile, glyphs.len(), opts)?;
+/// Render glyphs to an exact RGBA image (no anti-alias).
+///
+/// Grid layouts pad the last row with blank (all-zero) glyphs so the image is a
+/// full rectangle and clean parse can recover glyph count uniquely.
+pub fn render_rgba(
+    profile: &GlyphProfile,
+    glyphs: &[Grid],
+    opts: &RenderOptions,
+) -> Result<RgbaImage> {
+    opts.validate()?;
+    let glyphs = prepare_glyphs(profile, glyphs, opts)?;
+    let layout = opts.to_layout();
+    let (width, height) = image_size(profile, glyphs.len(), &layout)?;
     let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-    // Quiet margin: transparent black by default; fill margin with opaque black for PNG friendliness.
     fill_rect(
         &mut pixels,
         width,
@@ -214,24 +296,11 @@ pub fn render_rgba(
     );
 
     let s = opts.cell_scale;
-    let (gw, _gh) = glyph_pixel_size(profile, s)?;
-    let mut ox = opts.margin;
-
-    for g in glyphs {
-        for cy in 0..profile.height {
-            for cx in 0..profile.width {
-                let idx = g.get(cx, cy)?;
-                let [r, gch, b] = index_to_rgb(profile.palette_size, idx)?;
-                let px = ox + cx * s;
-                let py = opts.margin + cy * s;
-                fill_rect(&mut pixels, width, height, px, py, s, s, [r, gch, b, 255]);
-            }
-        }
-        ox = ox
-            .checked_add(gw)
-            .and_then(|x| x.checked_add(opts.gap))
-            .ok_or_else(|| GlyphixError::InvalidRender("glyph x overflow".into()))?;
+    for (i, g) in glyphs.iter().enumerate() {
+        let (ox, oy) = glyph_origin(profile, i, glyphs.len(), &layout)?;
+        paint_glyph_at(&mut pixels, width, height, profile, g, ox, oy, s)?;
     }
+    paint_separators(&mut pixels, width, height, profile, glyphs.len(), &layout)?;
 
     Ok(RgbaImage {
         width,
@@ -241,77 +310,21 @@ pub fn render_rgba(
 }
 
 /// Parse a **clean** RGBA raster back into glyphs.
-///
-/// Requirements:
-/// - Dimensions match [`image_dimensions`] for some glyph count ≤ `max_glyphs`
-/// - Each \(S\times S\) cell block is a solid color (all pixels identical RGB)
-/// - Margin pixels are ignored for data (not validated strictly)
-/// - Colors must map exactly via [`rgb_to_index`]
 pub fn parse_rgba(
     profile: &GlyphProfile,
     image: &RgbaImage,
     opts: &RenderOptions,
 ) -> Result<Vec<Grid>> {
     opts.validate()?;
-    let s = opts.cell_scale;
-    let (gw, gh) = glyph_pixel_size(profile, s)?;
-
-    if image.height != gh + opts.margin.saturating_mul(2) {
-        return Err(GlyphixError::InvalidRaster(format!(
-            "image height {} does not match expected {} (profile {}x{}, scale {}, margin {})",
-            image.height,
-            gh + opts.margin * 2,
-            profile.width,
-            profile.height,
-            s,
-            opts.margin
-        )));
-    }
-
-    let inner_w = image
-        .width
-        .checked_sub(opts.margin.saturating_mul(2))
-        .ok_or_else(|| GlyphixError::InvalidRaster("margin larger than width".into()))?;
-
-    // Solve: n * gw + (n-1) * gap = inner_w  =>  n * (gw+gap) - gap = inner_w
-    let step = gw
-        .checked_add(opts.gap)
-        .ok_or_else(|| GlyphixError::InvalidRender("step overflow".into()))?;
-    if step == 0 {
-        return Err(GlyphixError::InvalidRender("glyph width is 0".into()));
-    }
-    let n = if opts.gap == 0 {
-        if inner_w % gw != 0 {
-            return Err(GlyphixError::InvalidRaster(format!(
-                "inner width {inner_w} not divisible by glyph width {gw}"
-            )));
-        }
-        (inner_w / gw) as usize
-    } else {
-        // inner_w + gap = n * step
-        let numer = inner_w
-            .checked_add(opts.gap)
-            .ok_or_else(|| GlyphixError::InvalidRaster("width+gap overflow".into()))?;
-        if numer % step != 0 {
-            return Err(GlyphixError::InvalidRaster(format!(
-                "inner width {inner_w} does not match glyph strip with gap {}",
-                opts.gap
-            )));
-        }
-        (numer / step) as usize
-    };
-
-    if n == 0 {
-        return Err(GlyphixError::EmptyGlyphSequence);
-    }
+    let layout = opts.to_layout();
+    let n = infer_glyph_count(profile, image.width, image.height, &layout)?;
     if n > profile.max_glyphs {
         return Err(GlyphixError::GlyphCountExceeded {
             count: n,
             cap: profile.max_glyphs,
         });
     }
-
-    let expected = image_dimensions(profile, n, opts)?;
+    let expected = image_size(profile, n, &layout)?;
     if image.width != expected.0 || image.height != expected.1 {
         return Err(GlyphixError::InvalidRaster(format!(
             "image size {}x{} != expected {}x{} for {n} glyphs",
@@ -319,11 +332,11 @@ pub fn parse_rgba(
         )));
     }
 
+    let s = opts.cell_scale;
     let mut glyphs = Vec::with_capacity(n);
-    for gi in 0..n {
+    for i in 0..n {
         let mut grid = Grid::from_profile(profile);
-        let ox = opts.margin + gi as u32 * step;
-        let oy = opts.margin;
+        let (ox, oy) = glyph_origin(profile, i, n, &layout)?;
         for cy in 0..profile.height {
             for cx in 0..profile.width {
                 let px = ox + cx * s;
@@ -362,17 +375,11 @@ pub fn render_svg(
     opts: &RenderOptions,
 ) -> Result<String> {
     opts.validate()?;
-    if glyphs.is_empty() {
-        return Err(GlyphixError::EmptyGlyphSequence);
-    }
-    for g in glyphs {
-        g.validate_profile(profile)?;
-    }
-
-    let (width, height) = image_dimensions(profile, glyphs.len(), opts)?;
+    let glyphs = prepare_glyphs(profile, glyphs, opts)?;
+    let layout = opts.to_layout();
+    let (width, height) = image_size(profile, glyphs.len(), &layout)?;
     let s = opts.cell_scale;
-    let (gw, _) = glyph_pixel_size(profile, s)?;
-    let step = gw + opts.gap;
+    let (gw, gh) = layout_glyph_pixel_size(profile, s)?;
 
     let mut out = String::new();
     out.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
@@ -381,21 +388,49 @@ pub fn render_svg(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" shape-rendering="crispEdges">"#
     ));
     out.push('\n');
-    // Background
     out.push_str(&format!(
         r##"<rect width="{width}" height="{height}" fill="#000000"/>"##
     ));
     out.push('\n');
 
-    for (gi, g) in glyphs.iter().enumerate() {
-        let ox = opts.margin + gi as u32 * step;
-        let oy = opts.margin;
+    if let Some(sep) = layout.separator {
+        let [r, g, b] = sep.color;
+        for i in 0..glyphs.len() {
+            let (ox, oy) = glyph_origin(profile, i, glyphs.len(), &layout)?;
+            let (col, row) = match layout.layout {
+                GlyphLayout::HorizontalStrip => (i as u32, 0u32),
+                GlyphLayout::Grid { columns } => ((i as u32) % columns, (i as u32) / columns),
+            };
+            let rows = layout.layout.rows_for(glyphs.len());
+            let last_in_row = match layout.layout {
+                GlyphLayout::HorizontalStrip => i + 1 >= glyphs.len(),
+                GlyphLayout::Grid { columns } => col + 1 >= columns || i + 1 >= glyphs.len(),
+            };
+            if !last_in_row {
+                let sx = ox + gw;
+                out.push_str(&format!(
+                    r##"<rect x="{sx}" y="{oy}" width="{}" height="{gh}" fill="#{r:02X}{g:02X}{b:02X}"/>"##,
+                    sep.thickness
+                ));
+                out.push('\n');
+            }
+            if row + 1 < rows {
+                let sy = oy + gh;
+                out.push_str(&format!(
+                    r##"<rect x="{ox}" y="{sy}" width="{gw}" height="{}" fill="#{r:02X}{g:02X}{b:02X}"/>"##,
+                    sep.thickness
+                ));
+                out.push('\n');
+            }
+        }
+    }
+
+    for (i, g) in glyphs.iter().enumerate() {
+        let (ox, oy) = glyph_origin(profile, i, glyphs.len(), &layout)?;
         for cy in 0..profile.height {
             for cx in 0..profile.width {
                 let idx = g.get(cx, cy)?;
                 let [r, gc, b] = index_to_rgb(profile.palette_size, idx)?;
-                // Skip pure black cells (background already black) for smaller SVG;
-                // still exact when composited on black.
                 if r == 0 && gc == 0 && b == 0 {
                     continue;
                 }
@@ -504,7 +539,6 @@ mod tests {
         let g = paint_value_u128(&p, 1).unwrap();
         let opts = RenderOptions::scale(4).unwrap();
         let img = render_rgba(&p, &[g], &opts).unwrap();
-        // BR cell is (7,7) → device rect [28..32) x [28..32)
         for y in 28..32 {
             for x in 28..32 {
                 assert_eq!(img.get_rgb(x, y).unwrap(), [255, 255, 255], "{x},{y}");
@@ -523,7 +557,6 @@ mod tests {
         assert!(svg.contains("crispEdges"));
         assert!(svg.contains(r#"width="16""#));
         assert!(svg.contains(r#"height="16""#));
-        // BR white rect at scale 2: x=14 y=14
         assert!(svg.contains(r#"x="14" y="14""#));
     }
 
@@ -536,11 +569,36 @@ mod tests {
             cell_scale: 2,
             margin: 1,
             gap: 1,
+            gap_y: None,
             layout: GlyphLayout::HorizontalStrip,
+            separator: None,
         };
         let img = render_rgba(&p, &glyphs, &opts).unwrap();
         let back = parse_rgba(&p, &img, &opts).unwrap();
         assert_eq!(crate::decode(&p, &back).unwrap(), payload);
+    }
+
+    #[test]
+    fn grid_layout_roundtrip() {
+        let p = bin8();
+        let payload = b"grid-layout-test-bytes!!!!"; // enough for several glyphs
+        let glyphs = encode(&p, payload).unwrap();
+        assert!(glyphs.len() >= 2);
+        let opts = RenderOptions::grid(2, 2, 1, 1).unwrap();
+        let img = render_rgba(&p, &glyphs, &opts).unwrap();
+        let back = parse_rgba(&p, &img, &opts).unwrap();
+        assert_eq!(crate::decode(&p, &back).unwrap(), payload);
+    }
+
+    #[test]
+    fn separator_strip_roundtrip() {
+        let p = bin8();
+        let glyphs = encode(&p, b"sep!").unwrap();
+        let mut opts = RenderOptions::strip(2, 0, 1).unwrap();
+        opts.separator = Some(Separator::gray(2).unwrap());
+        let img = render_rgba(&p, &glyphs, &opts).unwrap();
+        let back = parse_rgba(&p, &img, &opts).unwrap();
+        assert_eq!(crate::decode(&p, &back).unwrap(), b"sep!");
     }
 
     #[test]
@@ -565,9 +623,7 @@ mod tests {
         let g = paint_value_u128(&p, 0).unwrap();
         let opts = RenderOptions::scale(2).unwrap();
         let mut img = render_rgba(&p, &[g], &opts).unwrap();
-        // Corrupt one device pixel inside a cell
-        let i = 0;
-        img.pixels[i] = 255;
+        img.pixels[0] = 255;
         assert!(parse_rgba(&p, &img, &opts).is_err());
     }
 }

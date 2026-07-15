@@ -17,10 +17,16 @@
 //! header (version + integrity tag + length). Optional CRC32 / BLAKE3 trailers
 //! detect corruption (see [`check::Integrity`]).
 //!
-//! ## Render (Phase 3)
+//! ## Render & layout (Phase 3–4)
 //!
 //! [`render::render_rgba`] / [`render::render_svg`] paint glyphs with cell scale
-//! \(S\). PNG I/O is behind the **`render`** feature.
+//! \(S\). Layout: horizontal strip or grid, margins, gaps, separators
+//! ([`layout`]). PNG I/O is behind the **`render`** feature.
+//!
+//! ## Streaming (Phase 4)
+//!
+//! [`stream::encode_chunked`] splits large payloads into independent framed
+//! frames of at most N glyphs each.
 //!
 //! ```
 //! use glyphix::{decode, encode, encode_with, EncodeOptions, Integrity, bin10};
@@ -52,15 +58,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capacity;
 pub mod check;
 pub mod codec;
 pub mod color;
 pub mod error;
 pub mod grid;
+pub mod layout;
 pub mod pack;
 pub mod profile;
 pub mod render;
+pub mod stream;
 
+pub use capacity::{format_report_line, report as capacity_report, table_all_presets, CapacityReport};
 pub use check::Integrity;
 pub use codec::{
     capacity_bits, capacity_payload_bytes, capacity_payload_bytes_with, decode, encode,
@@ -70,6 +80,7 @@ pub use codec::{
 pub use color::{index_to_rgb, rgb_to_index, Rgb};
 pub use error::{GlyphixError, Result};
 pub use grid::Grid;
+pub use layout::{GlyphLayout, LayoutOptions, Separator};
 pub use pack::{
     grid_to_bit_string, normalize_bit_string, paint_bit_string, paint_bit_string_sequence,
     paint_bit_string_sequence_with, paint_digits, paint_normalized_bits, paint_value_u128,
@@ -81,7 +92,11 @@ pub use profile::{
 };
 pub use render::{
     encode_svg, glyph_pixel_size, image_dimensions, parse_rgba, render_rgba, render_svg,
-    GlyphLayout, RenderOptions, RgbaImage,
+    RenderOptions, RgbaImage,
+};
+pub use stream::{
+    chunk_payload_capacity, chunks_needed, decode_chunked, encode_chunked, glyph_batches,
+    ChunkEncoder,
 };
 
 #[cfg(feature = "render")]

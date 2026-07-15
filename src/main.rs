@@ -5,14 +5,16 @@ fn main() {
     use std::path::PathBuf;
 
     use clap::{Parser, Subcommand, ValueEnum};
+    use glyphix::capacity::{format_report_line, report, table_all_presets};
     use glyphix::profile::{preset, preset_ids};
     use glyphix::render::{
         decode_png, encode_png, encode_svg, parse_rgba, render_rgba, render_svg, write_png,
         RenderOptions,
     };
+    use glyphix::stream::{decode_chunked, encode_chunked};
     use glyphix::{
-        capacity_payload_bytes_with, decode, encode_with, glyph_count_for_with, grid_to_bit_string,
-        paint_bit_string, paint_bit_string_sequence, EncodeOptions, Integrity,
+        decode, encode_with, glyph_count_for_with, grid_to_bit_string, paint_bit_string,
+        paint_bit_string_sequence, EncodeOptions, GlyphLayout, Integrity, Separator,
     };
 
     #[derive(Parser)]
@@ -33,19 +35,34 @@ fn main() {
         Debug,
     }
 
+    #[derive(Clone, ValueEnum)]
+    enum LayoutCli {
+        Strip,
+        Grid,
+    }
+
     #[derive(Subcommand)]
     enum Cmd {
         /// List built-in profiles.
         Profiles,
-        /// Show payload capacity for N glyphs.
+        /// Show payload capacity (single profile or all presets).
         Capacity {
             #[arg(short = 'p', long, default_value = "bin10")]
             profile: String,
-            #[arg(short = 'n', long, default_value_t = 1)]
-            glyphs: usize,
-            /// Integrity overhead: none | crc32 | blake3-128 | blake3-256
+            /// Glyph counts (comma-separated), e.g. 1,4,10
+            #[arg(short = 'n', long, default_value = "1")]
+            glyphs: String,
             #[arg(long, default_value = "none")]
             check: String,
+            /// Cell scale for image size column.
+            #[arg(short = 's', long, default_value_t = 1)]
+            scale: u32,
+            /// Print a table for every preset at the given -n values.
+            #[arg(long, default_value_t = false)]
+            all: bool,
+            /// Grid columns (image size uses grid layout when set).
+            #[arg(long)]
+            columns: Option<u32>,
         },
         /// Encode bytes/text to PNG, SVG, or a debug dump.
         Encode {
@@ -53,45 +70,60 @@ fn main() {
             profile: String,
             #[arg(long, default_value = "none")]
             check: String,
-            /// Cell scale S (device pixels per logical cell).
             #[arg(short = 's', long, default_value_t = 4)]
             scale: u32,
-            /// Quiet margin in device pixels.
             #[arg(long, default_value_t = 0)]
             margin: u32,
-            /// Gap between glyphs in device pixels.
             #[arg(long, default_value_t = 0)]
             gap: u32,
-            /// Output path (`.png` / `.svg`); required unless `--format debug`.
+            #[arg(long)]
+            gap_y: Option<u32>,
+            /// Layout: strip (default) or grid.
+            #[arg(long, value_enum, default_value_t = LayoutCli::Strip)]
+            layout: LayoutCli,
+            /// Grid columns (required for --layout grid; default 4).
+            #[arg(long)]
+            columns: Option<u32>,
+            /// Separator bar thickness in device pixels (0 = none).
+            #[arg(long, default_value_t = 0)]
+            separator: u32,
+            /// Max glyphs per independent chunk (0 = single frame).
+            #[arg(long, default_value_t = 0)]
+            chunk_glyphs: usize,
             #[arg(short = 'o', long)]
             output: Option<PathBuf>,
-            /// Force format (default: from output extension, else debug).
             #[arg(long, value_enum)]
             format: Option<OutFormat>,
-            /// Read payload from file instead of `text`.
             #[arg(short = 'i', long)]
             input: Option<PathBuf>,
-            /// Payload text (UTF-8). Ignored if `--input` is set.
             text: Option<String>,
         },
-        /// Decode a clean PNG (or re-parse after encode) to payload.
+        /// Decode a clean PNG to payload.
         Decode {
             #[arg(short = 'p', long, default_value = "bin10")]
             profile: String,
-            /// Cell scale used when the image was rendered.
             #[arg(short = 's', long, default_value_t = 4)]
             scale: u32,
             #[arg(long, default_value_t = 0)]
             margin: u32,
             #[arg(long, default_value_t = 0)]
             gap: u32,
-            /// Write payload bytes to this file (default: stdout if text-like, else hex note).
+            #[arg(long)]
+            gap_y: Option<u32>,
+            #[arg(long, value_enum, default_value_t = LayoutCli::Strip)]
+            layout: LayoutCli,
+            #[arg(long)]
+            columns: Option<u32>,
+            #[arg(long, default_value_t = 0)]
+            separator: u32,
+            /// Multiple chunk PNGs (order preserved); alternative to single `input`.
+            #[arg(long)]
+            chunks: Vec<PathBuf>,
             #[arg(short = 'o', long)]
             output: Option<PathBuf>,
-            /// Input PNG path.
-            input: PathBuf,
+            input: Option<PathBuf>,
         },
-        /// Round-trip encode then decode (optional PNG file in the middle).
+        /// Round-trip encode then decode.
         Roundtrip {
             #[arg(short = 'p', long, default_value = "bin10")]
             profile: String,
@@ -99,28 +131,22 @@ fn main() {
             check: String,
             #[arg(short = 's', long, default_value_t = 4)]
             scale: u32,
-            /// If set, write PNG and decode via raster.
             #[arg(long)]
             png: Option<PathBuf>,
+            #[arg(long, value_enum, default_value_t = LayoutCli::Strip)]
+            layout: LayoutCli,
+            #[arg(long)]
+            columns: Option<u32>,
             text: String,
         },
         /// Paint glyph(s) from a human bit string (not framed text encode).
-        ///
-        /// Single glyph: rightmost bit = bottom-right; pad left if short; trunc right if long.
-        ///
-        /// Sequence:
-        /// - Comma-separated: `1,11,101` → one glyph per field (each pad/trunc alone)
-        /// - Continuous + `--strip`: bits spill into the next glyph; final partial left-padded
         Paint {
             #[arg(short = 'p', long, default_value = "bin8")]
             profile: String,
-            /// Bit string (0/1; `_` `-` whitespace ignored). Use commas for multiple glyphs.
             #[arg(short = 'b', long)]
             bits: String,
-            /// Force this many glyphs (stream or comma list padded/truncated to N).
             #[arg(short = 'n', long)]
             glyphs: Option<usize>,
-            /// Continuous multi-glyph stream (overflow → next char). Implied by commas in `-b`.
             #[arg(long, default_value_t = false)]
             strip: bool,
             #[arg(short = 's', long, default_value_t = 8)]
@@ -129,11 +155,18 @@ fn main() {
             margin: u32,
             #[arg(long, default_value_t = 0)]
             gap: u32,
+            #[arg(long)]
+            gap_y: Option<u32>,
+            #[arg(long, value_enum, default_value_t = LayoutCli::Strip)]
+            layout: LayoutCli,
+            #[arg(long)]
+            columns: Option<u32>,
+            #[arg(long, default_value_t = 0)]
+            separator: u32,
             #[arg(short = 'o', long)]
             output: Option<PathBuf>,
             #[arg(long, value_enum)]
             format: Option<OutFormat>,
-            /// Also print the normalized bit string(s) to stdout.
             #[arg(long, default_value_t = false)]
             show_bits: bool,
         },
@@ -169,6 +202,42 @@ fn main() {
         }
     }
 
+    fn parse_ns(s: &str) -> Vec<usize> {
+        s.split(',')
+            .map(|p| p.trim().parse::<usize>().expect("glyph count integer"))
+            .collect()
+    }
+
+    fn make_render_opts(
+        scale: u32,
+        margin: u32,
+        gap: u32,
+        gap_y: Option<u32>,
+        layout: LayoutCli,
+        columns: Option<u32>,
+        separator: u32,
+    ) -> RenderOptions {
+        let lay = match layout {
+            LayoutCli::Strip => GlyphLayout::HorizontalStrip,
+            LayoutCli::Grid => GlyphLayout::grid(columns.unwrap_or(4)).expect("columns"),
+        };
+        let sep = if separator > 0 {
+            Some(Separator::gray(separator).expect("separator"))
+        } else {
+            None
+        };
+        let opts = RenderOptions {
+            cell_scale: scale,
+            margin,
+            gap,
+            gap_y,
+            layout: lay,
+            separator: sep,
+        };
+        opts.validate().expect("render options");
+        opts
+    }
+
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Profiles => {
@@ -187,15 +256,35 @@ fn main() {
             profile,
             glyphs,
             check,
+            scale,
+            all,
+            columns,
         } => {
-            let p = preset(&profile).expect("profile");
             let integ = Integrity::parse(&check).expect("check");
-            let bytes = capacity_payload_bytes_with(&p, glyphs, integ);
-            println!(
-                "profile={profile} glyphs={glyphs} check={} payload_bytes_max={bytes} bits={}",
-                integ.as_str(),
-                p.bits_per_glyph() * glyphs
-            );
+            let ns = parse_ns(&glyphs);
+            if all {
+                let rows = table_all_presets(&ns, integ, scale).expect("table");
+                for r in rows {
+                    println!("{}", format_report_line(&r));
+                }
+            } else {
+                let p = preset(&profile).expect("profile");
+                for n in ns {
+                    let mut r = report(&profile, &p, n, integ, scale).expect("report");
+                    if let Some(cols) = columns {
+                        let layout = glyphix::LayoutOptions::grid(scale, cols, 0, 0).expect("grid");
+                        let (w, h) =
+                            glyphix::layout::image_size(&p, n.max(1), &layout).expect("size");
+                        r.image_w = w;
+                        r.image_h = h;
+                    }
+                    println!("{}", format_report_line(&r));
+                    println!(
+                        "  payload_bytes_max={}  total_bits={}  image={}x{} @ scale={}",
+                        r.payload_bytes, r.total_bits, r.image_w, r.image_h, r.cell_scale
+                    );
+                }
+            }
         }
         Cmd::Encode {
             profile,
@@ -203,6 +292,11 @@ fn main() {
             scale,
             margin,
             gap,
+            gap_y,
+            layout,
+            columns,
+            separator,
+            chunk_glyphs,
             output,
             format,
             input,
@@ -212,14 +306,49 @@ fn main() {
             let integ = Integrity::parse(&check).expect("check");
             let payload = load_payload(&input, &text);
             let enc = EncodeOptions::with_integrity(integ);
-            let opts = RenderOptions {
-                cell_scale: scale,
-                margin,
-                gap,
-                ..RenderOptions::default()
-            };
-            opts.validate().expect("render options");
+            let opts = make_render_opts(scale, margin, gap, gap_y, layout, columns, separator);
             let fmt = guess_format(&output, &format);
+
+            if chunk_glyphs > 0 {
+                let frames = encode_chunked(&p, &payload, enc, chunk_glyphs).expect("chunked");
+                let base = output.expect("-o base path required for chunked encode (e.g. out.png)");
+                let stem = base
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("chunk");
+                let ext = base
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("png");
+                let parent = base.parent().unwrap_or_else(|| std::path::Path::new("."));
+                for (i, glyphs) in frames.iter().enumerate() {
+                    let path = parent.join(format!("{stem}_{i:04}.{ext}"));
+                    match fmt {
+                        OutFormat::Png | OutFormat::Debug => {
+                            let img = render_rgba(&p, glyphs, &opts).expect("render");
+                            write_png(&path, &img).expect("png");
+                        }
+                        OutFormat::Svg => {
+                            let svg = render_svg(&p, glyphs, &opts).expect("svg");
+                            std::fs::write(&path, svg).expect("write svg");
+                        }
+                    }
+                    println!(
+                        "wrote {} (chunk {i}/{}, {} glyphs)",
+                        path.display(),
+                        frames.len(),
+                        glyphs.len()
+                    );
+                }
+                println!(
+                    "chunked {} bytes → {} frame(s), max {} glyphs/frame, check={}",
+                    payload.len(),
+                    frames.len(),
+                    chunk_glyphs,
+                    integ.as_str()
+                );
+                return;
+            }
 
             match fmt {
                 OutFormat::Png => {
@@ -275,26 +404,27 @@ fn main() {
             scale,
             margin,
             gap,
+            gap_y,
+            layout,
+            columns,
+            separator,
+            chunks,
             output,
             input,
         } => {
             let p = preset(&profile).expect("profile");
-            let opts = RenderOptions {
-                cell_scale: scale,
-                margin,
-                gap,
-                ..RenderOptions::default()
-            };
-            let payload = if input
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("png"))
-                .unwrap_or(false)
-            {
-                decode_png(&p, &input, &opts).expect("decode png")
+            let opts = make_render_opts(scale, margin, gap, gap_y, layout, columns, separator);
+
+            let payload = if !chunks.is_empty() {
+                let mut frames = Vec::new();
+                for path in &chunks {
+                    let img = glyphix::read_png(path).expect("read png");
+                    frames.push(parse_rgba(&p, &img, &opts).expect("parse"));
+                }
+                decode_chunked(&p, &frames).expect("decode chunked")
             } else {
-                // Treat as PNG anyway if image crate can open it; else error.
-                decode_png(&p, &input, &opts).expect("decode image as png/rgba")
+                let path = input.expect("input PNG or --chunks");
+                decode_png(&p, &path, &opts).expect("decode png")
             };
 
             if let Some(path) = output {
@@ -312,12 +442,14 @@ fn main() {
             check,
             scale,
             png,
+            layout,
+            columns,
             text,
         } => {
             let p = preset(&profile).expect("profile");
             let integ = Integrity::parse(&check).expect("check");
             let enc = EncodeOptions::with_integrity(integ);
-            let opts = RenderOptions::scale(scale).expect("scale");
+            let opts = make_render_opts(scale, 0, 0, None, layout, columns, 0);
             let payload = text.as_bytes();
 
             let out = if let Some(path) = png {
@@ -348,21 +480,17 @@ fn main() {
             scale,
             margin,
             gap,
+            gap_y,
+            layout,
+            columns,
+            separator,
             output,
             format,
             show_bits,
         } => {
             let p = preset(&profile).expect("profile");
-            let opts = RenderOptions {
-                cell_scale: scale,
-                margin,
-                gap,
-                ..RenderOptions::default()
-            };
-            opts.validate().expect("render options");
+            let opts = make_render_opts(scale, margin, gap, gap_y, layout, columns, separator);
 
-            // Commas → multi-glyph list. --strip / -n → continuous stream (or forced N).
-            // Plain short/long string without those → single glyph (pad left / trunc right).
             let gs = if bits.contains(',') || strip || glyph_n.is_some() {
                 paint_bit_string_sequence(&p, &bits, glyph_n).expect("paint bits")
             } else {
@@ -423,7 +551,6 @@ fn main() {
         }
     }
 
-    /// Tiny hex encoder so we do not add a hex crate for rare binary stdout.
     mod hex {
         pub fn encode_fallback(bytes: &[u8]) -> String {
             const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -441,7 +568,7 @@ fn main() {
 fn main() {
     eprintln!(
         "glyphix CLI is disabled; rebuild with: cargo run --features cli -- --help\n\
-         Library: glyphix::{{encode, decode, render_rgba, render_svg, bin10}}\n\
+         Library: glyphix::{{encode, decode, render_rgba, render_svg, encode_chunked, bin10}}\n\
          PNG helpers need feature `render`."
     );
     std::process::exit(2);

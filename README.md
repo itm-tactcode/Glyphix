@@ -51,8 +51,15 @@ cargo run --features cli -- paint -p bin8 -b 1 -s 16 -o /tmp/br.png --show-bits
 # Sequence: comma = one glyph per field
 cargo run --features cli -- paint -p bin8 -b '1,11,101' -s 8 -o /tmp/seq.png --show-bits
 
-# Sequence: continuous stream spills into next glyph (65 ones → full white + BR)
-cargo run --features cli -- paint -p bin8 -b "$(python3 -c "print('1'*65)")" --strip -s 8 -o /tmp/spill.png --show-bits
+# Layout: grid + separator bars
+cargo run --features cli -- encode -p bin10 -s 4 --layout grid --columns 3 --separator 2 \
+  -o /tmp/grid.png "phase4"
+
+# Capacity table for all presets
+cargo run --features cli -- capacity -n 1,4,10 --all -s 4
+
+# Chunked encode for large payloads (independent frames)
+cargo run --features cli -- encode -p bin8 -s 2 --chunk-glyphs 4 -o /tmp/chunk.png -i big.bin
 ```
 
 ### Text encode vs bit-string paint
@@ -129,7 +136,7 @@ use glyphix::render::{render_rgba, parse_rgba, RenderOptions};
 | 1 Core codec | Done (lib + tests + optional CLI) |
 | 2 Integrity (CRC/BLAKE3) | Done (`Integrity` + v2 framing) |
 | 3 PNG/SVG + cell scale | Done (`render` / SVG / CLI `-s`) |
-| 4 Layout / capacity UX | Partial (strip + margin/gap; `capacity` CLI) |
+| 4 Layout / capacity / streaming | Done (grid, separators, chunked encode) |
 | 5+ ECC / camera / familiar shapes | Not started |
 
 ## License
