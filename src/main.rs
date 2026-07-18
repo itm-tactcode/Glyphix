@@ -5,7 +5,7 @@ fn main() {
     use std::path::PathBuf;
 
     use clap::{Parser, Subcommand, ValueEnum};
-    use glyphix::capacity::{format_report_line, report, table_all_presets};
+    use glyphix::capacity::{format_report_line, report_opts, table_all_presets_opts};
     use glyphix::profile::{preset, preset_ids};
     use glyphix::render::{
         decode_png, encode_png, encode_svg, parse_rgba, render_rgba, render_svg, write_png,
@@ -13,8 +13,8 @@ fn main() {
     };
     use glyphix::stream::{decode_chunked, encode_chunked};
     use glyphix::{
-        decode, encode_with, glyph_count_for_with, grid_to_bit_string, paint_bit_string,
-        paint_bit_string_sequence, EncodeOptions, GlyphLayout, Integrity, Separator,
+        decode, encode_with, glyph_count_for_opts, grid_to_bit_string, paint_bit_string,
+        paint_bit_string_sequence, Ecc, EncodeOptions, GlyphLayout, Integrity, Separator,
     };
 
     #[derive(Parser)]
@@ -54,6 +54,9 @@ fn main() {
             glyphs: String,
             #[arg(long, default_value = "none")]
             check: String,
+            /// ECC: none | rs10 | rs20 | rs:N
+            #[arg(long, default_value = "none")]
+            ecc: String,
             /// Cell scale for image size column.
             #[arg(short = 's', long, default_value_t = 1)]
             scale: u32,
@@ -70,6 +73,9 @@ fn main() {
             profile: String,
             #[arg(long, default_value = "none")]
             check: String,
+            /// ECC: none | rs10 | rs20 | rs:N (Reed–Solomon before paint)
+            #[arg(long, default_value = "none")]
+            ecc: String,
             #[arg(short = 's', long, default_value_t = 4)]
             scale: u32,
             #[arg(long, default_value_t = 0)]
@@ -129,6 +135,8 @@ fn main() {
             profile: String,
             #[arg(long, default_value = "none")]
             check: String,
+            #[arg(long, default_value = "none")]
+            ecc: String,
             #[arg(short = 's', long, default_value_t = 4)]
             scale: u32,
             #[arg(long)]
@@ -256,21 +264,27 @@ fn main() {
             profile,
             glyphs,
             check,
+            ecc,
             scale,
             all,
             columns,
         } => {
             let integ = Integrity::parse(&check).expect("check");
+            let ecc = Ecc::parse(&ecc).expect("ecc");
+            let opts = EncodeOptions {
+                integrity: integ,
+                ecc,
+            };
             let ns = parse_ns(&glyphs);
             if all {
-                let rows = table_all_presets(&ns, integ, scale).expect("table");
+                let rows = table_all_presets_opts(&ns, opts, scale).expect("table");
                 for r in rows {
                     println!("{}", format_report_line(&r));
                 }
             } else {
                 let p = preset(&profile).expect("profile");
                 for n in ns {
-                    let mut r = report(&profile, &p, n, integ, scale).expect("report");
+                    let mut r = report_opts(&profile, &p, n, opts, scale).expect("report");
                     if let Some(cols) = columns {
                         let layout = glyphix::LayoutOptions::grid(scale, cols, 0, 0).expect("grid");
                         let (w, h) =
@@ -289,6 +303,7 @@ fn main() {
         Cmd::Encode {
             profile,
             check,
+            ecc,
             scale,
             margin,
             gap,
@@ -304,8 +319,9 @@ fn main() {
         } => {
             let p = preset(&profile).expect("profile");
             let integ = Integrity::parse(&check).expect("check");
+            let ecc = Ecc::parse(&ecc).expect("ecc");
             let payload = load_payload(&input, &text);
-            let enc = EncodeOptions::with_integrity(integ);
+            let enc = EncodeOptions::with_integrity_and_ecc(integ, ecc);
             let opts = make_render_opts(scale, margin, gap, gap_y, layout, columns, separator);
             let fmt = guess_format(&output, &format);
 
@@ -341,11 +357,12 @@ fn main() {
                     );
                 }
                 println!(
-                    "chunked {} bytes → {} frame(s), max {} glyphs/frame, check={}",
+                    "chunked {} bytes → {} frame(s), max {} glyphs/frame, check={}, ecc={}",
                     payload.len(),
                     frames.len(),
                     chunk_glyphs,
-                    integ.as_str()
+                    integ.as_str(),
+                    ecc.as_str()
                 );
                 return;
             }
@@ -355,10 +372,11 @@ fn main() {
                     let path = output.expect("-o path required for PNG");
                     encode_png(&p, &payload, &path, &opts, enc).expect("encode png");
                     println!(
-                        "wrote {} ({} bytes payload, scale={scale}, check={})",
+                        "wrote {} ({} bytes payload, scale={scale}, check={}, ecc={})",
                         path.display(),
                         payload.len(),
-                        integ.as_str()
+                        integ.as_str(),
+                        ecc.as_str()
                     );
                 }
                 OutFormat::Svg => {
@@ -440,6 +458,7 @@ fn main() {
         Cmd::Roundtrip {
             profile,
             check,
+            ecc,
             scale,
             png,
             layout,
@@ -448,7 +467,8 @@ fn main() {
         } => {
             let p = preset(&profile).expect("profile");
             let integ = Integrity::parse(&check).expect("check");
-            let enc = EncodeOptions::with_integrity(integ);
+            let ecc = Ecc::parse(&ecc).expect("ecc");
+            let enc = EncodeOptions::with_integrity_and_ecc(integ, ecc);
             let opts = make_render_opts(scale, 0, 0, None, layout, columns, 0);
             let payload = text.as_bytes();
 
@@ -465,10 +485,11 @@ fn main() {
             };
 
             assert_eq!(out, payload);
-            let n = glyph_count_for_with(&p, payload, integ).unwrap();
+            let n = glyph_count_for_opts(&p, payload, enc).unwrap();
             println!(
-                "ok profile={profile} check={} glyphs={n} scale={scale} bytes={}",
+                "ok profile={profile} check={} ecc={} glyphs={n} scale={scale} bytes={}",
                 integ.as_str(),
+                ecc.as_str(),
                 payload.len()
             );
         }

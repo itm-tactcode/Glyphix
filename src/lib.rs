@@ -15,7 +15,8 @@
 //!
 //! [`encode`] / [`decode`] map byte strings to glyph sequences with a framed
 //! header (version + integrity tag + length). Optional CRC32 / BLAKE3 trailers
-//! detect corruption (see [`check::Integrity`]).
+//! detect corruption (see [`check::Integrity`]). Optional Reed–Solomon ECC
+//! corrects payload damage before integrity verify (see [`ecc::Ecc`]).
 //!
 //! ## Render & layout (Phase 3–4)
 //!
@@ -62,6 +63,7 @@ pub mod capacity;
 pub mod check;
 pub mod codec;
 pub mod color;
+pub mod ecc;
 pub mod error;
 pub mod grid;
 pub mod layout;
@@ -70,14 +72,19 @@ pub mod profile;
 pub mod render;
 pub mod stream;
 
-pub use capacity::{format_report_line, report as capacity_report, table_all_presets, CapacityReport};
+pub use capacity::{
+    format_report_line, report as capacity_report, report_opts as capacity_report_opts,
+    table_all_presets, table_all_presets_opts, CapacityReport,
+};
 pub use check::Integrity;
 pub use codec::{
-    capacity_bits, capacity_payload_bytes, capacity_payload_bytes_with, decode, encode,
-    encode_with, glyph_count_for, glyph_count_for_with, glyphs_needed, EncodeOptions,
-    V1_HEADER_BITS, V2_HEADER_BITS,
+    capacity_bits, capacity_payload_bytes, capacity_payload_bytes_opts,
+    capacity_payload_bytes_with, decode, encode, encode_with, glyph_count_for,
+    glyph_count_for_opts, glyph_count_for_with, glyphs_needed, glyphs_needed_with, EncodeOptions,
+    V1_HEADER_BITS, V2_HEADER_BITS, V3_HEADER_BITS,
 };
 pub use color::{index_to_rgb, rgb_to_index, Rgb};
+pub use ecc::Ecc;
 pub use error::{GlyphixError, Result};
 pub use grid::Grid;
 pub use layout::{GlyphLayout, LayoutOptions, Separator};
@@ -88,7 +95,7 @@ pub use pack::{
 };
 pub use profile::{
     bin10, bin16, bin8, c256_8, c8_8, preset, preset_ids, rgb24_8, GlyphProfile, CODEC_VERSION,
-    CODEC_VERSION_V1, DEFAULT_MAX_GLYPHS,
+    CODEC_VERSION_V1, CODEC_VERSION_V2, DEFAULT_MAX_GLYPHS,
 };
 pub use render::{
     encode_svg, glyph_pixel_size, image_dimensions, parse_rgba, render_rgba, render_svg,

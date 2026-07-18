@@ -68,6 +68,12 @@ pub enum GlyphixError {
 
     #[error("invalid bit string: {0}")]
     InvalidBitString(String),
+
+    #[error("unknown ecc tag {tag} (0=none, 1..=50 = RS parity percent)")]
+    UnknownEcc { tag: u8 },
+
+    #[error("error correction failed: {0}")]
+    EccDecodeFailed(String),
 }
 
 /// Convenient result alias.

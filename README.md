@@ -60,7 +60,19 @@ cargo run --features cli -- capacity -n 1,4,10 --all -s 4
 
 # Chunked encode for large payloads (independent frames)
 cargo run --features cli -- encode -p bin8 -s 2 --chunk-glyphs 4 -o /tmp/chunk.png -i big.bin
+
+# Reed–Solomon ECC (~10% parity) + CRC detection
+cargo run --features cli -- roundtrip -p bin10 --ecc rs10 --check crc32 "hello ecc"
+cargo run --features cli -- capacity -p bin10 -n 10 --ecc rs10
 ```
+
+### ECC vs integrity
+
+| | **Integrity** (CRC/BLAKE3) | **ECC** (Reed–Solomon) |
+|--|---------------------------|-------------------------|
+| Role | Detect corruption | Correct limited byte/symbol errors |
+| Capacity | small trailer | parity expands the body |
+| When it helps | “data changed” | “a few cells got flipped” |
 
 ### Text encode vs bit-string paint
 
@@ -83,18 +95,18 @@ cargo run --features cli -- encode -p bin8 -s 2 --chunk-glyphs 4 -o /tmp/chunk.p
 ```rust
 use glyphix::{
     decode, encode, encode_with, bin10, paint_value_u128,
-    EncodeOptions, Integrity,
+    EncodeOptions, Integrity, Ecc,
 };
 
 let profile = bin10();
 let glyphs = encode(&profile, b"hello").unwrap();
 assert_eq!(decode(&profile, &glyphs).unwrap(), b"hello");
 
-// Optional integrity trailer (error detection, not a signature)
+// Optional integrity + Reed–Solomon ECC
 let protected = encode_with(
     &profile,
     b"hello",
-    EncodeOptions::with_integrity(Integrity::Crc32),
+    EncodeOptions::with_integrity_and_ecc(Integrity::Crc32, Ecc::rs10()),
 ).unwrap();
 assert_eq!(decode(&profile, &protected).unwrap(), b"hello");
 
@@ -137,7 +149,8 @@ use glyphix::render::{render_rgba, parse_rgba, RenderOptions};
 | 2 Integrity (CRC/BLAKE3) | Done (`Integrity` + v2 framing) |
 | 3 PNG/SVG + cell scale | Done (`render` / SVG / CLI `-s`) |
 | 4 Layout / capacity / streaming | Done (grid, separators, chunked encode) |
-| 5+ ECC / camera / familiar shapes | Not started |
+| 5 Reed–Solomon ECC | Done (`--ecc rs10` / `Ecc::rs10()`) |
+| 6+ finder / camera / familiar shapes | Not started |
 
 ## License
 

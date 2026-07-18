@@ -1,7 +1,10 @@
 //! Capacity reports for CLI and library users (Phase 4).
 
 use crate::check::Integrity;
-use crate::codec::{capacity_bits, capacity_payload_bytes_with, glyphs_needed};
+use crate::codec::{
+    capacity_bits, capacity_payload_bytes_opts, glyphs_needed, EncodeOptions,
+};
+use crate::ecc::Ecc;
 use crate::error::Result;
 use crate::layout::{image_size, GlyphLayout, LayoutOptions};
 use crate::profile::{preset_ids, GlyphProfile};
@@ -17,6 +20,7 @@ pub struct CapacityReport {
     pub bits_per_glyph: usize,
     pub glyph_count: usize,
     pub integrity: Integrity,
+    pub ecc: Ecc,
     pub payload_bytes: usize,
     pub total_bits: usize,
     /// Image size at the given scale (strip layout, no margin/gap).
@@ -27,7 +31,7 @@ pub struct CapacityReport {
     pub chunks_if_budget_is_this: usize,
 }
 
-/// Build a capacity report for one profile / glyph count / integrity / scale.
+/// Build a capacity report for one profile / glyph count / integrity / scale (no ECC).
 pub fn report(
     profile_id: &str,
     profile: &GlyphProfile,
@@ -35,7 +39,27 @@ pub fn report(
     integrity: Integrity,
     cell_scale: u32,
 ) -> Result<CapacityReport> {
-    let payload_bytes = capacity_payload_bytes_with(profile, glyph_count, integrity);
+    report_opts(
+        profile_id,
+        profile,
+        glyph_count,
+        EncodeOptions {
+            integrity,
+            ecc: Ecc::None,
+        },
+        cell_scale,
+    )
+}
+
+/// Capacity report with full encode options (integrity + ECC).
+pub fn report_opts(
+    profile_id: &str,
+    profile: &GlyphProfile,
+    glyph_count: usize,
+    opts: EncodeOptions,
+    cell_scale: u32,
+) -> Result<CapacityReport> {
+    let payload_bytes = capacity_payload_bytes_opts(profile, glyph_count, opts);
     let total_bits = capacity_bits(profile, glyph_count);
     let layout = LayoutOptions {
         cell_scale,
@@ -50,7 +74,8 @@ pub fn report(
     } else {
         image_size(profile, glyph_count, &layout)?
     };
-    let chunks = chunks_needed(profile, payload_bytes, glyph_count.max(1), integrity)?;
+    // chunks_needed ignores ECC; approximate with integrity-only for table
+    let chunks = chunks_needed(profile, payload_bytes, glyph_count.max(1), opts.integrity)?;
     Ok(CapacityReport {
         profile_id: profile_id.to_string(),
         width: profile.width,
@@ -58,7 +83,8 @@ pub fn report(
         palette_size: profile.palette_size,
         bits_per_glyph: profile.bits_per_glyph(),
         glyph_count,
-        integrity,
+        integrity: opts.integrity,
+        ecc: opts.ecc,
         payload_bytes,
         total_bits,
         image_w,
@@ -97,10 +123,11 @@ pub fn glyphs_for_bytes(
 /// Format a single report line for CLI.
 pub fn format_report_line(r: &CapacityReport) -> String {
     format!(
-        "{:10}  n={:<4}  check={:<11}  payload_bytes={:<6}  bits={:<6}  {}x{} @s={}  ({}x{} C={})",
+        "{:10}  n={:<4}  check={:<11}  ecc={:<6}  payload_bytes={:<6}  bits={:<6}  {}x{} @s={}  ({}x{} C={})",
         r.profile_id,
         r.glyph_count,
         r.integrity.as_str(),
+        r.ecc.as_str(),
         r.payload_bytes,
         r.total_bits,
         r.image_w,
@@ -118,11 +145,27 @@ pub fn table_all_presets(
     integrity: Integrity,
     cell_scale: u32,
 ) -> Result<Vec<CapacityReport>> {
+    table_all_presets_opts(
+        glyph_counts,
+        EncodeOptions {
+            integrity,
+            ecc: Ecc::None,
+        },
+        cell_scale,
+    )
+}
+
+/// Table with ECC included.
+pub fn table_all_presets_opts(
+    glyph_counts: &[usize],
+    opts: EncodeOptions,
+    cell_scale: u32,
+) -> Result<Vec<CapacityReport>> {
     let mut rows = Vec::new();
     for id in preset_ids() {
         let p = crate::profile::preset(id)?;
         for &n in glyph_counts {
-            rows.push(report(id, &p, n, integrity, cell_scale)?);
+            rows.push(report_opts(id, &p, n, opts, cell_scale)?);
         }
     }
     Ok(rows)

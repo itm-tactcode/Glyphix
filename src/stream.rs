@@ -8,7 +8,8 @@
 
 use crate::check::Integrity;
 use crate::codec::{
-    capacity_payload_bytes_with, decode, encode_with, glyphs_needed, EncodeOptions,
+    capacity_payload_bytes_opts, capacity_payload_bytes_with, decode, encode_with, glyphs_needed,
+    EncodeOptions,
 };
 use crate::error::{GlyphixError, Result};
 use crate::grid::Grid;
@@ -16,7 +17,7 @@ use crate::profile::GlyphProfile;
 
 /// Encode `payload` as a sequence of independent framed glyph frames.
 ///
-/// Each frame holds at most `max_glyphs` glyphs (including its own header/trailer).
+/// Each frame holds at most `max_glyphs` glyphs (including its own header/trailer/ECC).
 /// Empty payload yields a single empty frame.
 pub fn encode_chunked(
     profile: &GlyphProfile,
@@ -36,11 +37,10 @@ pub fn encode_chunked(
         });
     }
 
-    let cap = capacity_payload_bytes_with(profile, max_glyphs_per_chunk, opts.integrity);
+    let cap = capacity_payload_bytes_opts(profile, max_glyphs_per_chunk, opts);
     if cap == 0 {
         return Err(GlyphixError::InvalidProfile(format!(
-            "max_glyphs_per_chunk={max_glyphs_per_chunk} cannot hold any payload bytes with {:?}",
-            opts.integrity
+            "max_glyphs_per_chunk={max_glyphs_per_chunk} cannot hold any payload bytes with opts={opts:?}"
         )));
     }
 
@@ -84,13 +84,22 @@ pub fn glyph_batches(glyphs: &[Grid], batch_size: usize) -> Result<Vec<&[Grid]>>
     Ok(glyphs.chunks(batch_size).collect())
 }
 
-/// How many payload bytes fit in one chunk of `max_glyphs` under `integrity`.
+/// How many payload bytes fit in one chunk of `max_glyphs` under `integrity` (no ECC).
 pub fn chunk_payload_capacity(
     profile: &GlyphProfile,
     max_glyphs: usize,
     integrity: Integrity,
 ) -> usize {
     capacity_payload_bytes_with(profile, max_glyphs, integrity)
+}
+
+/// How many payload bytes fit with full encode options (integrity + ECC).
+pub fn chunk_payload_capacity_opts(
+    profile: &GlyphProfile,
+    max_glyphs: usize,
+    opts: EncodeOptions,
+) -> usize {
+    capacity_payload_bytes_opts(profile, max_glyphs, opts)
 }
 
 /// Number of chunks needed for `payload_len` with the given chunk glyph budget.
@@ -131,7 +140,7 @@ impl ChunkEncoder {
         opts: EncodeOptions,
         max_glyphs_per_chunk: usize,
     ) -> Result<Self> {
-        let capacity = chunk_payload_capacity(&profile, max_glyphs_per_chunk, opts.integrity);
+        let capacity = capacity_payload_bytes_opts(&profile, max_glyphs_per_chunk, opts);
         if capacity == 0 || max_glyphs_per_chunk == 0 {
             return Err(GlyphixError::InvalidProfile(
                 "invalid chunk encoder capacity".into(),

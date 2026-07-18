@@ -4,8 +4,11 @@
 
 use crate::error::{GlyphixError, Result};
 
-/// Codec version written by current [`crate::encode`] (v2: integrity tag + optional trailer).
-pub const CODEC_VERSION: u8 = 2;
+/// Codec version when ECC is enabled (v3: integrity + ecc tag + length + coded body).
+pub const CODEC_VERSION: u8 = 3;
+
+/// Phase 2 framing without ECC (still written when [`crate::Ecc::None`]).
+pub const CODEC_VERSION_V2: u8 = 2;
 
 /// Legacy Phase 1 framing (decode-only): version + u32 length + payload, no integrity field.
 pub const CODEC_VERSION_V1: u8 = 1;

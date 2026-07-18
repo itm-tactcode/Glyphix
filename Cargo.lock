@@ -227,6 +227,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "image",
+ "reed-solomon",
  "thiserror",
 ]
 
@@ -332,6 +333,12 @@ checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "reed-solomon"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13de68c877a77f35885442ac72c8beb7c2f0b09380c43b734b9d63d1db69ee54"
 
 [[package]]
 name = "shlex"
